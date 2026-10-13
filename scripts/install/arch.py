@@ -412,8 +412,16 @@ class Installer:
                     packages = {}
                     for item in paths:
                         artifact = Path(item).resolve()
-                        if not artifact.is_relative_to(path.resolve()) or not artifact.is_file():
-                            raise ValueError(f"Missing or external package artifact: {item}")
+                        if not artifact.is_relative_to(path.resolve()):
+                            raise ValueError(f"External package artifact: {item}")
+                        if not artifact.is_file():
+                            # makepkg --packagelist lists -debug packages even when a
+                            # data-only build (no ELF debug symbols) generates none.
+                            # They are never installed by this installer; skip them.
+                            if re.search(r"-debug-\d", artifact.name):
+                                print(f"Skipping ungenerated debug package: {artifact.name}", flush=True)
+                                continue
+                            raise ValueError(f"Missing package artifact: {item}")
                         meta = run(
                             ["pacman", "-Qp", "-q", str(artifact)], capture=True
                         ).stdout.strip()
