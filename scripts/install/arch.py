@@ -388,7 +388,7 @@ class Installer:
                         if not artifact.is_relative_to(path.resolve()) or not artifact.is_file():
                             raise ValueError(f"Missing or external package artifact: {item}")
                         meta = run(
-                            ["pacman", "-Qp", "--print-format", "%n", str(artifact)], capture=True
+                            ["pacman", "-Qp", "-q", str(artifact)], capture=True
                         ).stdout.strip()
                         packages[meta] = artifact
                     self.artifacts[base] = packages
