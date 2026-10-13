@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 
@@ -29,6 +30,20 @@ MESSAGES = {
     "enable_clipboard": "Enable clipboard history capture with the Niri user service?",
     "start_now": "Start Clavis Shell and clipboard history capture in the current Niri session now? Active services will not be restarted.",
 }
+
+
+def urlopen_retry(url, *, timeout=60, attempts=8, backoff=2):
+    """Retry transient connection/TLS failures (flaky routes to GitHub and AUR)."""
+    delay = backoff
+    for attempt in range(1, attempts + 1):
+        try:
+            return urllib.request.urlopen(url, timeout=timeout)
+        except Exception as error:
+            if attempt >= attempts:
+                raise
+            print(f"Network retry {attempt}/{attempts - 1} for {url}: {error}", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 20)
 
 
 def run(argv, *, check=True, capture=False, cwd=None, timeout=None):
@@ -228,8 +243,8 @@ class Installer:
         tag = self.data.get("installerRelease") if base == "clavis-shell" else None
         endpoint = "tags/" + tag if tag else "latest"
         self.stage = f"GitHub release download {repository} ({tag or 'latest'})"
-        with urllib.request.urlopen(
-            f"https://api.github.com/repos/{repository}/releases/{endpoint}", timeout=30
+        with urlopen_retry(
+            f"https://api.github.com/repos/{repository}/releases/{endpoint}"
         ) as response:
             release = json.load(response)
         actual = release.get("tag_name", "")
@@ -244,7 +259,7 @@ class Installer:
         date(*map(int, match.group(1, 2, 3)))
         version = actual[1:]
         url = f"https://github.com/{repository}/releases/download/{actual}/"
-        with urllib.request.urlopen(url + "SHA256SUMS", timeout=30) as response:
+        with urlopen_retry(url + "SHA256SUMS") as response:
             checksum_text = response.read().decode("utf-8")
         checksums = {}
         for line in checksum_text.splitlines():
@@ -264,16 +279,28 @@ class Installer:
         # Fetch only build inputs, including split-package install scripts and hooks.
         selected = required | {n for n in checksums if n.endswith((".install", ".hook"))}
         for filename in sorted(selected):
-            digest = hashlib.sha256()
             # GitHub normalizes the hidden .SRCINFO release asset to default.SRCINFO.
             asset_name = "default.SRCINFO" if filename == ".SRCINFO" else filename
-            with urllib.request.urlopen(url + asset_name, timeout=30) as response:
-                with (path / filename).open("wb") as output:
-                    while chunk := response.read(1024 * 1024):
-                        digest.update(chunk)
-                        output.write(chunk)
-            if digest.hexdigest() != checksums[filename]:
-                raise ValueError(f"SHA-256 mismatch: {repository}/{actual}/{filename}")
+            delay = 2
+            for attempt in range(1, 9):
+                digest = hashlib.sha256()
+                try:
+                    with urllib.request.urlopen(url + asset_name, timeout=60) as response:
+                        with (path / filename).open("wb") as output:
+                            while chunk := response.read(1024 * 1024):
+                                digest.update(chunk)
+                                output.write(chunk)
+                    if digest.hexdigest() != checksums[filename]:
+                        raise ValueError("bad checksum")
+                    break
+                except Exception as error:
+                    if attempt >= 8:
+                        raise ValueError(
+                            f"Download of {repository}/{asset_name} failed after 8 attempts: {error}"
+                        ) from error
+                    print(f"Download retry {attempt}/7 for {asset_name}: {error}", flush=True)
+                    time.sleep(delay)
+                    delay = min(delay * 2, 20)
         metadata = (path / ".SRCINFO").read_text()
         fields = {}
         for line in metadata.splitlines():
@@ -308,7 +335,7 @@ class Installer:
         base = self.aur_bases.get(name)
         if base is None:
             url = "https://aur.archlinux.org/rpc/v5/info?" + urllib.parse.urlencode({"arg[]": name})
-            with urllib.request.urlopen(url, timeout=30) as response:
+            with urlopen_retry(url) as response:
                 result = json.load(response)
             matches = [r for r in result.get("results", []) if r["Name"] == name]
             if len(matches) != 1:
